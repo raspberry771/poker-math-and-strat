@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>RFI Trainer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="logo">♠</div>
+          <div class="brand-text">
+            <div class="title">RFI Trainer</div>
+            <div class="subtitle">6-max • Live-play prep</div>
+          </div>
+        </div>
+
+        <!-- NAV TABS -->
+        <div class="nav-tabs">
+          <button class="nav-tab active" id="tabTrainer">Trainer</button>
+          <button class="nav-tab" id="tabEditor">Edit Ranges</button>
+        </div>
+
+        <!-- TRAINER SIDEBAR CONTENT -->
+        <div id="sidebarTrainer">
+          <div class="section">
+            <div class="section-title">Training</div>
+
+            <label class="field">
+              <span class="label">Mode</span>
+              <select id="modeSelect" class="control">
+                <option value="random">Random position</option>
+                <option value="single">Single position drill</option>
+              </select>
+            </label>
+
+            <label class="field" id="positionField">
+              <span class="label">Position</span>
+              <select id="positionSelect" class="control">
+                <option value="UTG">UTG</option>
+                <option value="HJ">HJ</option>
+                <option value="CO">CO</option>
+                <option value="BTN">BTN</option>
+                <option value="SB">SB</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span class="label">Edge weight <span id="edgePctLabel" class="muted">70%</span></span>
+              <input id="edgeWeight" class="control" type="range" min="0" max="100" step="1" value="70" />
+              <div class="hint">70% border hands, 30% random</div>
+            </label>
+
+            <label class="field checkbox">
+              <input id="showGridToggle" type="checkbox" checked />
+              <span>Show full grid on reveal</span>
+            </label>
+
+            <label class="field checkbox">
+              <input id="showNeighborsToggle" type="checkbox" checked />
+              <span>Show nearby hands</span>
+            </label>
+
+            <label class="field checkbox">
+              <input id="debugToggle" type="checkbox" />
+              <span>Debug tools</span>
+            </label>
+
+            <button id="resetBtn" class="btn secondary">Reset session stats</button>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Session stats</div>
+            <div class="stats">
+              <div class="stat"><div class="stat-k">Hands</div><div class="stat-v" id="statHands">0</div></div>
+              <div class="stat"><div class="stat-k">Accuracy</div><div class="stat-v" id="statAcc">0%</div></div>
+              <div class="stat"><div class="stat-k">Streak</div><div class="stat-v" id="statStreak">0</div></div>
+              <div class="stat"><div class="stat-k">Best</div><div class="stat-v" id="statBest">0</div></div>
+            </div>
+            <div class="mini-table">
+              <div class="mini-row header"><div>Pos</div><div>Acc</div><div>N</div></div>
+              <div id="posBreakdown"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- EDITOR SIDEBAR CONTENT -->
+        <div id="sidebarEditor" hidden>
+          <div class="section">
+            <div class="section-title">Range Editor</div>
+
+            <label class="field">
+              <span class="label">Position</span>
+              <select id="editorPosSelect" class="control">
+                <option value="UTG">UTG</option>
+                <option value="HJ">HJ</option>
+                <option value="CO">CO</option>
+                <option value="BTN">BTN</option>
+                <option value="SB">SB</option>
+              </select>
+            </label>
+
+            <div class="field">
+              <span class="label">Paint brush</span>
+              <div class="brush-btns">
+                <button class="brush-btn raise active" data-action="RAISE" id="brushRaise">Raise</button>
+                <button class="brush-btn call" data-action="CALL" id="brushCall">Call</button>
+                <button class="brush-btn fold" data-action="FOLD" id="brushFold">Fold</button>
+              </div>
+              <div class="hint">Click or drag to paint. Right-click to cycle action.</div>
+            </div>
+
+            <label class="field">
+              <span class="label">Mixed % <span class="muted" id="mixedPctLabel">50%</span></span>
+              <input id="mixedFreq" class="control" type="range" min="5" max="95" step="5" value="50" />
+              <div class="hint">Hold Shift while painting to set a mixed frequency instead of pure action</div>
+            </label>
+
+            <div class="editor-actions">
+              <button id="fillRaiseBtn" class="btn secondary">Fill all Raise</button>
+              <button id="fillFoldBtn" class="btn secondary">Fill all Fold</button>
+              <button id="clearPosBtn" class="btn secondary danger">Clear position</button>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Save / Load</div>
+            <div class="save-status">
+              <span class="save-dot" id="saveDot"></span>
+              <span id="saveStatusText">Saved</span>
+            </div>
+            <div class="editor-actions">
+              <button id="exportBtn" class="btn">⬇ Export this position</button>
+              <button id="exportAllBtn" class="btn secondary">⬇ Export all positions</button>
+              <button id="importBtn" class="btn secondary">⬆ Import JSON</button>
+              <input id="importFile" type="file" accept=".json" hidden />
+              <button id="resetRangesBtn" class="btn secondary danger">↺ Reset to defaults</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="footer">
+          <div class="muted small">Strict grading: top-frequency action only.</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <!-- ===== TRAINER VIEW ===== -->
+        <div id="viewTrainer">
+          <header class="topbar">
+            <div class="crumbs">
+              <span class="pill" id="pillSpot">RFI</span>
+              <span class="pill" id="pillPos">—</span>
+              <span class="pill subtle" id="pillSource">70/30 edge mix</span>
+            </div>
+            <div class="top-actions">
+              <button id="nextBtnTop" class="btn" disabled>Next hand</button>
+            </div>
+          </header>
+
+          <section class="content">
+            <div class="card question">
+              <div class="question-header">
+                <div class="q-meta">
+                  <div class="q-title" id="qTitle">Position</div>
+                  <div class="q-sub muted" id="qSub">First in • 6-max</div>
+                </div>
+                <div class="hand-rail">
+                  <div class="hand-tag muted">HAND</div>
+                  <div class="hand" id="handLabel">—</div>
+                </div>
+              </div>
+              <div class="table-stage" id="tableStage"></div>
+            </div>
+
+            <div class="actions" id="actionButtons"></div>
+
+            <div class="card reveal" id="revealCard" hidden>
+              <div class="reveal-head">
+                <div>
+                  <div class="reveal-title" id="revealTitle">—</div>
+                  <div class="muted" id="revealDetail">—</div>
+                </div>
+                <button id="nextBtn" class="btn">Next hand</button>
+              </div>
+
+              <div class="reveal-body">
+                <div class="panel" id="gridPanel">
+                  <div class="panel-title">Range grid</div>
+                  <div id="gridWrap" class="grid-wrap"></div>
+                  <div class="legend">
+                    <div class="leg"><span class="dot raise"></span> Raise</div>
+                    <div class="leg"><span class="dot call"></span> Call (SB)</div>
+                    <div class="leg"><span class="dot fold"></span> Fold</div>
+                  </div>
+                </div>
+                <div class="panel" id="neighborsPanel">
+                  <div class="panel-title">Nearby hands</div>
+                  <div id="neighborsList" class="neighbors"></div>
+                </div>
+              </div>
+
+              <div class="debug" id="debugArea" hidden>
+                <div class="panel-title">Debug</div>
+                <div class="debug-grid">
+                  <div class="debug-card">
+                    <div class="muted small">Extracted action totals (combo-weighted)</div>
+                    <pre id="debugTotals"></pre>
+                  </div>
+                  <div class="debug-card">
+                    <div class="muted small">Current cell frequencies</div>
+                    <pre id="debugCell"></pre>
+                  </div>
+                </div>
+                <button id="downloadCsvBtn" class="btn secondary">Download ranges CSV</button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ===== EDITOR VIEW ===== -->
+        <div id="viewEditor" hidden>
+          <header class="topbar">
+            <div class="crumbs">
+              <span class="pill">Range Editor</span>
+              <span class="pill" id="editorPosLabel">UTG</span>
+            </div>
+            <div class="top-actions editor-topbar-legend">
+              <span class="legend-item"><span class="dot raise"></span> Raise</span>
+              <span class="legend-item"><span class="dot call"></span> Call</span>
+              <span class="legend-item"><span class="dot fold"></span> Fold</span>
+              <span class="legend-item"><span class="dot mixed"></span> Mixed</span>
+            </div>
+          </header>
+
+          <section class="content editor-content">
+            <div class="editor-info-bar">
+              <span class="muted small">Click or drag to paint • Right-click to cycle • Shift+click for mixed %</span>
+              <span id="editorHandInfo" class="editor-hand-info muted small"></span>
+            </div>
+            <div class="card editor-card">
+              <div id="editorGridWrap" class="grid-wrap editor-grid"></div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
