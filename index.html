@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>RFI Trainer</title>
+    <title>Poker Trainer</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -12,7 +12,7 @@
         <div class="brand">
           <div class="logo">♠</div>
           <div class="brand-text">
-            <div class="title">RFI Trainer</div>
+            <div class="title">Poker Trainer</div>
             <div class="subtitle">6-max • Live-play prep</div>
           </div>
         </div>
@@ -27,6 +27,28 @@
         <div id="sidebarTrainer">
           <div class="section">
             <div class="section-title">Training</div>
+
+            <label class="field">
+              <span class="label">Category</span>
+              <select id="scenarioCategorySelect" class="control">
+                <option value="rfi">RFI</option>
+                <option value="offense">3-Bet Offense</option>
+                <option value="defense">3-Bet Defense</option>
+              </select>
+            </label>
+
+            <label class="field" id="scenarioMatrixField">
+              <span class="label">Scenario</span>
+              <select id="scenarioMatrixSelect" class="control"></select>
+            </label>
+
+            <label class="field">
+              <span class="label">Deal mode</span>
+              <select id="dealModeSelect" class="control">
+                <option value="drill">Drill (border-weighted)</option>
+                <option value="live">Live sim (random deck)</option>
+              </select>
+            </label>
 
             <label class="field">
               <span class="label">Mode</span>
@@ -47,9 +69,20 @@
               </select>
             </label>
 
-            <label class="field">
-              <span class="label">Edge weight <span id="edgePctLabel" class="muted">70%</span></span>
-              <input id="edgeWeight" class="control" type="range" min="0" max="100" step="1" value="70" />
+            <label class="field" id="edgeWeightField">
+              <span class="label"
+                >Edge weight
+                <span id="edgePctLabel" class="muted">70%</span></span
+              >
+              <input
+                id="edgeWeight"
+                class="control"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value="70"
+              />
               <div class="hint">70% border hands, 30% random</div>
             </label>
 
@@ -68,19 +101,37 @@
               <span>Debug tools</span>
             </label>
 
-            <button id="resetBtn" class="btn secondary">Reset session stats</button>
+            <button id="resetBtn" class="btn secondary">
+              Reset session stats
+            </button>
           </div>
 
           <div class="section">
             <div class="section-title">Session stats</div>
             <div class="stats">
-              <div class="stat"><div class="stat-k">Hands</div><div class="stat-v" id="statHands">0</div></div>
-              <div class="stat"><div class="stat-k">Accuracy</div><div class="stat-v" id="statAcc">0%</div></div>
-              <div class="stat"><div class="stat-k">Streak</div><div class="stat-v" id="statStreak">0</div></div>
-              <div class="stat"><div class="stat-k">Best</div><div class="stat-v" id="statBest">0</div></div>
+              <div class="stat">
+                <div class="stat-k">Hands</div>
+                <div class="stat-v" id="statHands">0</div>
+              </div>
+              <div class="stat">
+                <div class="stat-k">Accuracy</div>
+                <div class="stat-v" id="statAcc">0%</div>
+              </div>
+              <div class="stat">
+                <div class="stat-k">Streak</div>
+                <div class="stat-v" id="statStreak">0</div>
+              </div>
+              <div class="stat">
+                <div class="stat-k">Best</div>
+                <div class="stat-v" id="statBest">0</div>
+              </div>
             </div>
             <div class="mini-table">
-              <div class="mini-row header"><div>Pos</div><div>Acc</div><div>N</div></div>
+              <div class="mini-row header">
+                <div>Pos</div>
+                <div>Acc</div>
+                <div>N</div>
+              </div>
               <div id="posBreakdown"></div>
             </div>
           </div>
@@ -91,7 +142,7 @@
           <div class="section">
             <div class="section-title">Range Editor</div>
 
-            <label class="field">
+            <label class="field" id="editorPosField">
               <span class="label">Position</span>
               <select id="editorPosSelect" class="control">
                 <option value="UTG">UTG</option>
@@ -102,26 +153,86 @@
               </select>
             </label>
 
+            <!-- Matrix editor controls (hidden for RFI) -->
+            <div id="editorMatrixContext" hidden>
+              <div class="label muted small" id="editorMatrixLabel">—</div>
+              <label class="field">
+                <span class="label">Hero position</span>
+                <select id="editorHeroPosSelect" class="control"></select>
+              </label>
+              <label class="field">
+                <span class="label">Villain position</span>
+                <select id="editorVillainPosSelect" class="control"></select>
+              </label>
+            </div>
+
             <div class="field">
               <span class="label">Paint brush</span>
               <div class="brush-btns">
-                <button class="brush-btn raise active" data-action="RAISE" id="brushRaise">Raise</button>
-                <button class="brush-btn call" data-action="CALL" id="brushCall">Call</button>
-                <button class="brush-btn fold" data-action="FOLD" id="brushFold">Fold</button>
+                <button
+                  class="brush-btn raise active"
+                  data-action="RAISE"
+                  id="brushRaise"
+                >
+                  Raise
+                </button>
+                <button
+                  class="brush-btn bluff"
+                  data-action="BLUFF_3BET"
+                  id="brushBluff"
+                  style="display:none"
+                >
+                  Bluff 3B
+                </button>
+                <button
+                  class="brush-btn call"
+                  data-action="CALL"
+                  id="brushCall"
+                >
+                  Call
+                </button>
+                <button
+                  class="brush-btn fold"
+                  data-action="FOLD"
+                  id="brushFold"
+                >
+                  Fold
+                </button>
               </div>
-              <div class="hint">Click or drag to paint. Right-click to cycle action.</div>
+              <div class="hint">
+                Click or drag to paint. Right-click to cycle action.
+              </div>
             </div>
 
             <label class="field">
-              <span class="label">Mixed % <span class="muted" id="mixedPctLabel">50%</span></span>
-              <input id="mixedFreq" class="control" type="range" min="5" max="95" step="5" value="50" />
-              <div class="hint">Hold Shift while painting to set a mixed frequency instead of pure action</div>
+              <span class="label"
+                >Mixed % <span class="muted" id="mixedPctLabel">50%</span></span
+              >
+              <input
+                id="mixedFreq"
+                class="control"
+                type="range"
+                min="5"
+                max="95"
+                step="5"
+                value="50"
+              />
+              <div class="hint">
+                Hold Shift while painting to set a mixed frequency instead of
+                pure action
+              </div>
             </label>
 
             <div class="editor-actions">
-              <button id="fillRaiseBtn" class="btn secondary">Fill all Raise</button>
-              <button id="fillFoldBtn" class="btn secondary">Fill all Fold</button>
-              <button id="clearPosBtn" class="btn secondary danger">Clear position</button>
+              <button id="fillRaiseBtn" class="btn secondary">
+                Fill all Raise
+              </button>
+              <button id="fillFoldBtn" class="btn secondary">
+                Fill all Fold
+              </button>
+              <button id="clearPosBtn" class="btn secondary danger">
+                Clear position
+              </button>
             </div>
           </div>
 
@@ -133,16 +244,25 @@
             </div>
             <div class="editor-actions">
               <button id="exportBtn" class="btn">⬇ Export this position</button>
-              <button id="exportAllBtn" class="btn secondary">⬇ Export all positions</button>
-              <button id="importBtn" class="btn secondary">⬆ Import JSON</button>
+              <button id="exportAllBtn" class="btn secondary">
+                ⬇ Export all positions
+              </button>
+              <button id="importBtn" class="btn secondary">
+                ⬆ Import JSON
+              </button>
               <input id="importFile" type="file" accept=".json" hidden />
-              <button id="resetRangesBtn" class="btn secondary danger">↺ Reset to defaults</button>
+              <button id="resetRangesBtn" class="btn secondary danger">
+                ↺ Reset to defaults
+              </button>
             </div>
           </div>
         </div>
 
         <div class="footer">
-          <div class="muted small">Strict grading: top-frequency action only.</div>
+          <div class="muted small">
+            Strict grading: top-frequency action only. Keys: 1=Raise/4-Bet ·
+            2=Call · 3=Fold
+          </div>
         </div>
       </aside>
 
@@ -192,7 +312,9 @@
                   <div id="gridWrap" class="grid-wrap"></div>
                   <div class="legend">
                     <div class="leg"><span class="dot raise"></span> Raise</div>
-                    <div class="leg"><span class="dot call"></span> Call (SB)</div>
+                    <div class="leg">
+                      <span class="dot call"></span> Call (SB)
+                    </div>
                     <div class="leg"><span class="dot fold"></span> Fold</div>
                   </div>
                 </div>
@@ -206,7 +328,9 @@
                 <div class="panel-title">Debug</div>
                 <div class="debug-grid">
                   <div class="debug-card">
-                    <div class="muted small">Extracted action totals (combo-weighted)</div>
+                    <div class="muted small">
+                      Extracted action totals (combo-weighted)
+                    </div>
                     <pre id="debugTotals"></pre>
                   </div>
                   <div class="debug-card">
@@ -214,7 +338,9 @@
                     <pre id="debugCell"></pre>
                   </div>
                 </div>
-                <button id="downloadCsvBtn" class="btn secondary">Download ranges CSV</button>
+                <button id="downloadCsvBtn" class="btn secondary">
+                  Download ranges CSV
+                </button>
               </div>
             </div>
           </section>
@@ -228,17 +354,37 @@
               <span class="pill" id="editorPosLabel">UTG</span>
             </div>
             <div class="top-actions editor-topbar-legend">
-              <span class="legend-item"><span class="dot raise"></span> Raise</span>
-              <span class="legend-item"><span class="dot call"></span> Call</span>
-              <span class="legend-item"><span class="dot fold"></span> Fold</span>
-              <span class="legend-item"><span class="dot mixed"></span> Mixed</span>
+              <span class="legend-item"
+                ><span class="dot raise"></span> Value 3B</span
+              >
+              <span class="legend-item"
+                ><span class="dot bluff"></span> Bluff 3B</span
+              >
+              <span class="legend-item"
+                ><span class="dot raise"></span> Raise</span
+              >
+              <span class="legend-item"
+                ><span class="dot call"></span> Call</span
+              >
+              <span class="legend-item"
+                ><span class="dot fold"></span> Fold</span
+              >
+              <span class="legend-item"
+                ><span class="dot mixed"></span> Mixed</span
+              >
             </div>
           </header>
 
           <section class="content editor-content">
             <div class="editor-info-bar">
-              <span class="muted small">Click or drag to paint • Right-click to cycle • Shift+click for mixed %</span>
-              <span id="editorHandInfo" class="editor-hand-info muted small"></span>
+              <span class="muted small"
+                >Click or drag to paint • Right-click to cycle • Shift+click for
+                mixed %</span
+              >
+              <span
+                id="editorHandInfo"
+                class="editor-hand-info muted small"
+              ></span>
             </div>
             <div class="card editor-card">
               <div id="editorGridWrap" class="grid-wrap editor-grid"></div>
@@ -248,6 +394,16 @@
       </main>
     </div>
 
-    <script src="app.js"></script>
+    <script src="js/constants.js"></script>
+    <script src="js/ranges.js"></script>
+    <script src="js/hand-helpers.js"></script>
+    <script src="js/scenarios.js"></script>
+    <script src="js/storage.js"></script>
+    <script src="js/audio.js"></script>
+    <script src="js/state.js"></script>
+    <script src="js/training.js"></script>
+    <script src="js/editor.js"></script>
+    <script src="js/render.js"></script>
+    <script src="js/main.js"></script>
   </body>
 </html>

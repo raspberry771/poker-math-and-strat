@@ -9,6 +9,7 @@
   --raise: #e24444;
   --fold: #2b78c2;
   --call: #2fb36d;
+  --bluff: #dc8c28;
   --accent: #7c5cff;
 }
 * {
@@ -318,6 +319,10 @@ body {
   border-color: rgba(226, 68, 68, 0.35);
   background: rgba(226, 68, 68, 0.1);
 }
+.action-btn.bluff {
+  border-color: rgba(220, 140, 40, 0.35);
+  background: rgba(220, 140, 40, 0.1);
+}
 .action-btn.call {
   border-color: rgba(47, 179, 109, 0.35);
   background: rgba(47, 179, 109, 0.1);
@@ -389,6 +394,9 @@ body {
 .cell.raise {
   background: rgba(226, 68, 68, 0.35);
 }
+.cell.bluff {
+  background: rgba(220, 140, 40, 0.35);
+}
 .cell.fold {
   background: rgba(43, 120, 194, 0.35);
 }
@@ -405,6 +413,9 @@ body {
 }
 .seg.raise {
   background: rgba(226, 68, 68, 0.95);
+}
+.seg.bluff {
+  background: rgba(220, 140, 40, 0.95);
 }
 .seg.call {
   background: rgba(47, 179, 109, 0.95);
@@ -430,6 +441,9 @@ body {
 }
 .dot.raise {
   background: var(--raise);
+}
+.dot.bluff {
+  background: var(--bluff);
 }
 .dot.fold {
   background: var(--fold);
@@ -471,6 +485,9 @@ body {
 }
 .chip.raise {
   background: var(--raise);
+}
+.chip.bluff {
+  background: var(--bluff);
 }
 .chip.fold {
   background: var(--fold);
@@ -646,6 +663,36 @@ pre {
   box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.22), 0 0 18px rgba(124, 92, 255, 0.3);
 }
 
+.seat.villain .seat-chip {
+  border-color: rgba(226, 68, 68, 0.75);
+  box-shadow: 0 0 0 3px rgba(226, 68, 68, 0.18), 0 0 14px rgba(226, 68, 68, 0.25);
+}
+
+.card-mini.villain-back {
+  background: repeating-linear-gradient(
+    45deg,
+    #7a1a1a,
+    #7a1a1a 4px,
+    #5a1010 4px,
+    #5a1010 8px
+  );
+}
+
+.seat.aggressor .seat-chip {
+  border-color: rgba(251, 146, 60, 0.85);
+  box-shadow: 0 0 0 3px rgba(251, 146, 60, 0.2), 0 0 14px rgba(251, 146, 60, 0.3);
+}
+
+.card-mini.aggressor-back {
+  background: repeating-linear-gradient(
+    45deg,
+    #7c4000,
+    #7c4000 4px,
+    #5a2e00 4px,
+    #5a2e00 8px
+  );
+}
+
 .seat .cards {
   display: flex;
   gap: 4px;
@@ -809,6 +856,11 @@ pre {
   border-color: rgba(226,68,68,0.6);
   color: #ff8080;
 }
+.brush-btn.bluff.active {
+  background: rgba(220,140,40,0.25);
+  border-color: rgba(220,140,40,0.6);
+  color: #f0b060;
+}
 .brush-btn.call.active {
   background: rgba(47,179,109,0.25);
   border-color: rgba(47,179,109,0.6);
@@ -820,6 +872,7 @@ pre {
   color: #6ab0f5;
 }
 .brush-btn.raise:hover { background: rgba(226,68,68,0.15); color: var(--text); }
+.brush-btn.bluff:hover { background: rgba(220,140,40,0.15); color: var(--text); }
 .brush-btn.call:hover  { background: rgba(47,179,109,0.15); color: var(--text); }
 .brush-btn.fold:hover  { background: rgba(43,120,194,0.15); color: var(--text); }
 

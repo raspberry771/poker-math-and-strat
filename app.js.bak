@@ -1,7 +1,69 @@
 /* RFI Trainer — session-only, strict grading (top-frequency action) */
 const RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"];
 const POSITIONS = ["UTG", "HJ", "CO", "BTN", "SB"];
-const ACTIONS = ["RAISE", "CALL", "FOLD"]; // CALL only used for SB
+const ACTIONS = ["RAISE", "CALL", "FOLD"]; // CALL only used for SB RFI
+
+// Card engine constants
+const SUITS = ["♠", "♥", "♦", "♣"];
+const SUIT_COLOR = { "♠": "black", "♥": "red", "♦": "red", "♣": "black" };
+const RANK_IDX = Object.fromEntries(RANKS.map((r, i) => [r, i]));
+
+// VS 3-Bet scenario constants
+const VS3BET_ACTIONS = ["FOUR_BET", "CALL", "FOLD"];
+const VS3BET_VILLAIN_POSITIONS = {
+  UTG: ["CO", "BTN", "SB", "BB"],
+  HJ:  ["CO", "BTN", "SB", "BB"],
+  CO:  ["BTN", "SB", "BB"],
+  BTN: ["SB", "BB"],
+  SB:  ["BB"],
+};
+// Postflop action order (earlier index = acts first = OOP)
+const PF_ORDER_IDX = Object.fromEntries(
+  ["SB", "BB", "UTG", "HJ", "CO", "BTN"].map((p, i) => [p, i])
+);
+
+// 3-Bet matrix action sets
+const THREE_BET_ACTIONS     = ["THREE_BET", "CALL", "FOLD"];
+const THREE_BET_OOP_ACTIONS = ["THREE_BET", "FOLD"];
+const FOUR_BET_ACTIONS      = ["FOUR_BET",  "CALL", "FOLD"];
+const FOUR_BET_OOP_ACTIONS  = ["FOUR_BET",  "FOLD"];
+
+// Matrix definitions — single source of truth for all four 3-bet training matrices
+const MATRIX_CONFIG = {
+  IP_3BET: {
+    label: "IP 3-Bet", nickname: "The Sniper",
+    heroPositions: ["BTN"],
+    villainPositions: { BTN: ["UTG", "HJ", "CO"] },
+    actions: THREE_BET_ACTIONS,
+    category: "offense",
+  },
+  OOP_3BET: {
+    label: "OOP 3-Bet", nickname: "The Hammer",
+    heroPositions: ["SB"],
+    villainPositions: { SB: ["UTG", "HJ", "CO", "BTN"] },
+    actions: THREE_BET_OOP_ACTIONS,
+    category: "offense",
+  },
+  IP_DEFENSE: {
+    label: "IP Defense", nickname: "The Shield",
+    heroPositions: ["BTN"],
+    villainPositions: { BTN: ["SB", "BB"] },
+    actions: FOUR_BET_ACTIONS,
+    category: "defense",
+  },
+  OOP_DEFENSE: {
+    label: "OOP Defense", nickname: "The Red Alert",
+    heroPositions: ["UTG", "HJ", "CO"],
+    villainPositions: {
+      UTG: ["CO", "BTN", "SB", "BB"],
+      HJ:  ["CO", "BTN", "SB", "BB"],
+      CO:  ["BTN", "SB", "BB"],
+    },
+    actions: FOUR_BET_OOP_ACTIONS,
+    category: "defense",
+  },
+};
+const MATRIX_KEYS = Object.keys(MATRIX_CONFIG);
 
 // Hardcoded ranges extracted from your charts (frequency-based per hand).
 const RANGES = {
@@ -905,6 +967,32 @@ function saveRangesToStorage() {
   }
 }
 
+(function loadSavedThreebetRanges() {
+  try {
+    const saved = localStorage.getItem('rfi_threbet_ranges');
+    if (!saved) return;
+    const parsed = JSON.parse(saved);
+    if (!MATRIX_KEYS.every(k => parsed[k])) {
+      console.warn('RFI Trainer: threbet ranges failed validation, using defaults');
+      return;
+    }
+    THREBET_RANGES = parsed;
+    console.log('RFI Trainer: loaded threbet ranges from localStorage');
+  } catch(e) {
+    console.warn('RFI Trainer: could not load threbet ranges:', e.message);
+  }
+})();
+
+function saveThreebetRangesToStorage() {
+  try {
+    localStorage.setItem('rfi_threbet_ranges', JSON.stringify(THREBET_RANGES));
+    setSaveStatus('saved');
+  } catch(e) {
+    console.error('RFI Trainer: threbet save failed:', e.message);
+    setSaveStatus('error');
+  }
+}
+
 // Call this in browser console to debug: window.debugRanges()
 window.debugRanges = function() {
   const saved = localStorage.getItem('rfi_ranges');
@@ -926,6 +1014,189 @@ function setSaveStatus(status) {
 }
 
 // ============================================================
+// CARD ENGINE — 52-card deck dealing
+// ============================================================
+function createDeck() {
+  return RANKS.flatMap(rank => SUITS.map(suit => ({ rank, suit })));
+}
+function shuffleDeck(deck) {
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  return deck;
+}
+function dealTwo() {
+  return shuffleDeck(createDeck()).slice(0, 2);
+}
+function deriveCategory(c1, c2) {
+  const [hi, lo] = RANK_IDX[c1.rank] <= RANK_IDX[c2.rank] ? [c1, c2] : [c2, c1];
+  if (hi.rank === lo.rank) return hi.rank + lo.rank;
+  return hi.rank + lo.rank + (hi.suit === lo.suit ? "s" : "o");
+}
+function assignSuits(handLabel) {
+  const a = handLabel[0], b = handLabel[1];
+  const tag = handLabel.length === 2 ? null : handLabel[2];
+  if (tag === "s") {
+    const suit = SUITS[Math.floor(Math.random() * 4)];
+    return [{ rank: a, suit }, { rank: b, suit }];
+  }
+  // pair or offsuit: two different suits
+  const s1 = SUITS[Math.floor(Math.random() * 4)];
+  const rest = SUITS.filter(s => s !== s1);
+  const s2 = rest[Math.floor(Math.random() * 3)];
+  return [{ rank: a, suit: s1 }, { rank: b, suit: s2 }];
+}
+
+// ============================================================
+// VS 3-BET RANGES — built algorithmically from hand heuristics
+// ============================================================
+function isHeroIP(heroPos, villainPos) {
+  return PF_ORDER_IDX[heroPos] > PF_ORDER_IDX[villainPos];
+}
+
+function computeVs3betFreq(hand, ip) {
+  const tag = hand.length === 2 ? null : hand[2];
+  const isPair = tag === null;
+  const isSuited = tag === "s";
+  const r1 = RANK_IDX[hand[0]];
+
+  // AA, KK — always 4-bet
+  if (isPair && r1 <= 1) return { FOUR_BET: 1.0, CALL: 0, FOLD: 0 };
+  // QQ — value 4-bet + call mix
+  if (isPair && r1 === 2) return ip
+    ? { FOUR_BET: 0.35, CALL: 0.65, FOLD: 0 }
+    : { FOUR_BET: 0.6,  CALL: 0.4,  FOLD: 0 };
+  // JJ — mainly call
+  if (isPair && r1 === 3) return ip
+    ? { FOUR_BET: 0,    CALL: 1.0,  FOLD: 0 }
+    : { FOUR_BET: 0.15, CALL: 0.85, FOLD: 0 };
+  // TT — call IP, mixed OOP
+  if (isPair && r1 === 4) return ip
+    ? { FOUR_BET: 0, CALL: 1.0,  FOLD: 0 }
+    : { FOUR_BET: 0, CALL: 0.45, FOLD: 0.55 };
+  // 99 — call somewhat IP, fold OOP
+  if (isPair && r1 === 5) return ip
+    ? { FOUR_BET: 0, CALL: 0.65, FOLD: 0.35 }
+    : { FOUR_BET: 0, CALL: 0,    FOLD: 1.0 };
+  // 88 — small call IP, fold OOP
+  if (isPair && r1 === 6) return ip
+    ? { FOUR_BET: 0, CALL: 0.3, FOLD: 0.7 }
+    : { FOUR_BET: 0, CALL: 0,   FOLD: 1.0 };
+  // 77 and below — fold
+  if (isPair) return { FOUR_BET: 0, CALL: 0, FOLD: 1.0 };
+
+  // AK
+  if (hand === "AKs") return ip
+    ? { FOUR_BET: 0.5,  CALL: 0.5,  FOLD: 0 }
+    : { FOUR_BET: 0.75, CALL: 0.25, FOLD: 0 };
+  if (hand === "AKo") return ip
+    ? { FOUR_BET: 0.4,  CALL: 0.6,  FOLD: 0 }
+    : { FOUR_BET: 0.65, CALL: 0.35, FOLD: 0 };
+
+  // AQ
+  if (hand === "AQs") return ip
+    ? { FOUR_BET: 0, CALL: 1.0,  FOLD: 0 }
+    : { FOUR_BET: 0, CALL: 0.7,  FOLD: 0.3 };
+  if (hand === "AQo") return ip
+    ? { FOUR_BET: 0, CALL: 0.65, FOLD: 0.35 }
+    : { FOUR_BET: 0, CALL: 0.25, FOLD: 0.75 };
+
+  // AJ
+  if (hand === "AJs") return ip
+    ? { FOUR_BET: 0, CALL: 0.85, FOLD: 0.15 }
+    : { FOUR_BET: 0, CALL: 0.4,  FOLD: 0.6 };
+  if (hand === "AJo") return ip
+    ? { FOUR_BET: 0, CALL: 0.4, FOLD: 0.6 }
+    : { FOUR_BET: 0, CALL: 0,   FOLD: 1.0 };
+
+  // AT
+  if (hand === "ATs") return ip
+    ? { FOUR_BET: 0, CALL: 0.65, FOLD: 0.35 }
+    : { FOUR_BET: 0, CALL: 0.2,  FOLD: 0.8 };
+
+  // Ax suited — bluff 4-bets with ace blocker (A5s–A2s)
+  if (isSuited && hand[0] === "A") {
+    const r2 = RANK_IDX[hand[1]];
+    if (r2 === 9)  return { FOUR_BET: 0.75, CALL: 0, FOLD: 0.25 }; // A5s
+    if (r2 === 10) return { FOUR_BET: 0.55, CALL: 0, FOLD: 0.45 }; // A4s
+    if (r2 === 11) return { FOUR_BET: 0.35, CALL: 0, FOLD: 0.65 }; // A3s
+    if (r2 === 12) return { FOUR_BET: 0.2,  CALL: 0, FOLD: 0.8  }; // A2s
+  }
+
+  // KQ
+  if (hand === "KQs") return ip
+    ? { FOUR_BET: 0, CALL: 0.8,  FOLD: 0.2 }
+    : { FOUR_BET: 0, CALL: 0.35, FOLD: 0.65 };
+  if (hand === "KQo") return ip
+    ? { FOUR_BET: 0, CALL: 0.35, FOLD: 0.65 }
+    : { FOUR_BET: 0, CALL: 0,    FOLD: 1.0 };
+
+  // KJs
+  if (hand === "KJs") return ip
+    ? { FOUR_BET: 0, CALL: 0.5, FOLD: 0.5 }
+    : { FOUR_BET: 0, CALL: 0,   FOLD: 1.0 };
+
+  // QJs
+  if (hand === "QJs") return ip
+    ? { FOUR_BET: 0, CALL: 0.4, FOLD: 0.6 }
+    : { FOUR_BET: 0, CALL: 0,   FOLD: 1.0 };
+
+  // JTs
+  if (hand === "JTs") return ip
+    ? { FOUR_BET: 0, CALL: 0.35, FOLD: 0.65 }
+    : { FOUR_BET: 0, CALL: 0,    FOLD: 1.0 };
+
+  return { FOUR_BET: 0, CALL: 0, FOLD: 1.0 };
+}
+
+function buildVs3betRanges() {
+  const result = {};
+  for (const heroPos of POSITIONS) {
+    result[heroPos] = {};
+    for (const villainPos of (VS3BET_VILLAIN_POSITIONS[heroPos] || [])) {
+      result[heroPos][villainPos] = {};
+      const ip = isHeroIP(heroPos, villainPos);
+      for (const hand of Object.keys(RANGES[heroPos])) {
+        const heroFreq = RANGES[heroPos][hand];
+        if (dominantAction(heroFreq) === "FOLD") {
+          result[heroPos][villainPos][hand] = { FOUR_BET: 0, CALL: 0, FOLD: 1.0 };
+        } else {
+          result[heroPos][villainPos][hand] = computeVs3betFreq(hand, ip);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+const VS3BET_RANGES = buildVs3betRanges();
+
+// ============================================================
+// 3-BET MATRIX RANGES — blank slate (all FOLD), user paints them
+// ============================================================
+function buildThreebetRanges() {
+  const result = {};
+  for (const [matrix, cfg] of Object.entries(MATRIX_CONFIG)) {
+    result[matrix] = {};
+    for (const heroPos of cfg.heroPositions) {
+      result[matrix][heroPos] = {};
+      for (const villainPos of (cfg.villainPositions[heroPos] || [])) {
+        result[matrix][heroPos][villainPos] = {};
+        for (let r = 0; r < 13; r++)
+          for (let c = 0; c < 13; c++) {
+            const hand = handLabelFromCell(r, c);
+            const freq = Object.fromEntries(cfg.actions.map(a => [a, a === "FOLD" ? 1.0 : 0]));
+            result[matrix][heroPos][villainPos][hand] = freq;
+          }
+      }
+    }
+  }
+  return result;
+}
+let THREBET_RANGES = buildThreebetRanges();
+
+// ============================================================
 // HAND HELPERS
 // ============================================================
 function handLabelFromCell(r, c) {
@@ -940,9 +1211,9 @@ function combosForHand(hand) {
   if (hand.endsWith("o")) return 12;
   return 0;
 }
-function dominantAction(freq) {
-  let best = "FOLD", bestV = -1;
-  for (const a of ACTIONS) {
+function dominantAction(freq, acts = ACTIONS) {
+  let best = acts[acts.length - 1], bestV = -1;
+  for (const a of acts) {
     const v = freq[a] ?? 0;
     if (v > bestV) { bestV = v; best = a; }
   }
@@ -953,12 +1224,19 @@ function isMixed(freq) {
   return vals.length > 1;
 }
 function posActions(pos) {
+  if (isMatrixScenario()) return MATRIX_CONFIG[state.scenario].actions;
+  if (state.scenario === "VS3BET") return ["FOUR_BET", "CALL", "FOLD"];
   return pos === "SB" ? ["RAISE", "CALL", "FOLD"] : ["RAISE", "FOLD"];
 }
 function actionToClass(a) {
-  if (a === "RAISE") return "raise";
+  if (a === "RAISE" || a === "FOUR_BET" || a === "THREE_BET") return "raise";
   if (a === "CALL") return "call";
   return "fold";
+}
+function actionDisplayName(a) {
+  if (a === "FOUR_BET") return "4-Bet";
+  if (a === "THREE_BET") return "3-Bet";
+  return a[0] + a.slice(1).toLowerCase();
 }
 
 function buildGridForPosition(pos) {
@@ -1160,67 +1438,221 @@ function triggerCardDeal() {
 // ============================================================
 // STATE
 // ============================================================
+const ALL_SCENARIO_KEYS = ["RFI", "VS3BET", ...MATRIX_KEYS];
+
 const state = {
   view: "trainer", // "trainer" | "editor"
+  scenario: "RFI", // "RFI" | "VS3BET" | "IP_3BET" | "OOP_3BET" | "IP_DEFENSE" | "OOP_DEFENSE"
   settings: {
     mode: "random",
     position: "UTG",
     edgeWeight: 0.7,
+    dealMode: "drill", // "drill" | "live"
     showGrid: true,
     showNeighbors: true,
     debug: false,
   },
-  derived: { grids: {}, freqs: {}, border: {} },
-  current: null,
+  derived: {
+    grids:  { RFI: {}, VS3BET: {}, MATRIX: Object.fromEntries(MATRIX_KEYS.map(k => [k, {}])) },
+    freqs:  { RFI: {}, VS3BET: {}, MATRIX: Object.fromEntries(MATRIX_KEYS.map(k => [k, {}])) },
+    border: { RFI: {}, VS3BET: {}, MATRIX: Object.fromEntries(MATRIX_KEYS.map(k => [k, {}])) },
+  },
+  current: null, // { pos, villainPos, hand, cards, correct, isBorder, user, isCorrect }
   phase: "ASKING",
   stats: {
     hands: 0, correct: 0, streak: 0, best: 0,
     byPos: Object.fromEntries(POSITIONS.map(p => [p, { hands: 0, correct: 0 }])),
+    byScenario: Object.fromEntries(ALL_SCENARIO_KEYS.map(k => [k, { hands: 0, correct: 0 }])),
     mistakes: new Map(),
   },
   editor: {
-    pos: "UTG",
+    pos: "UTG",       // RFI position
+    heroPos: "BTN",   // matrix hero position
+    villainPos: "CO", // matrix villain position
+    matrix: null,     // active matrix key, or null for RFI
     brush: "RAISE",
     mixedFreq: 0.5,
     isPainting: false,
   },
 };
 
+function buildGridForMatrix(matrix, heroPos, villainPos) {
+  const ranges = THREBET_RANGES[matrix]?.[heroPos]?.[villainPos] || {};
+  const acts = MATRIX_CONFIG[matrix].actions;
+  const grid = Array.from({ length: 13 }, () => Array.from({ length: 13 }, () => null));
+  const freqByCell = Array.from({ length: 13 }, () => Array.from({ length: 13 }, () => null));
+  for (let r = 0; r < 13; r++)
+    for (let c = 0; c < 13; c++) {
+      const hand = handLabelFromCell(r, c);
+      const freq = ranges[hand] || Object.fromEntries(acts.map(a => [a, a === "FOLD" ? 1.0 : 0]));
+      grid[r][c] = dominantAction(freq, acts);
+      freqByCell[r][c] = freq;
+    }
+  return { grid, freqByCell };
+}
+
+function buildGridForVs3bet(heroPos, villainPos) {
+  const ranges = VS3BET_RANGES[heroPos][villainPos];
+  const grid = Array.from({ length: 13 }, () => Array.from({ length: 13 }, () => null));
+  const freqByCell = Array.from({ length: 13 }, () => Array.from({ length: 13 }, () => null));
+  for (let r = 0; r < 13; r++)
+    for (let c = 0; c < 13; c++) {
+      const hand = handLabelFromCell(r, c);
+      const freq = ranges[hand] || { FOUR_BET: 0, CALL: 0, FOLD: 1.0 };
+      grid[r][c] = dominantAction(freq, VS3BET_ACTIONS);
+      freqByCell[r][c] = freq;
+    }
+  return { grid, freqByCell };
+}
+
 function initDerived() {
+  // RFI grids
   for (const pos of POSITIONS) {
     const { grid, freqByCell } = buildGridForPosition(pos);
-    state.derived.grids[pos] = grid;
-    state.derived.freqs[pos] = freqByCell;
-    state.derived.border[pos] = computeBorderSet(pos, grid);
+    state.derived.grids.RFI[pos] = grid;
+    state.derived.freqs.RFI[pos] = freqByCell;
+    state.derived.border.RFI[pos] = computeBorderSet(pos, grid);
   }
+  // VS3BET grids
+  for (const heroPos of POSITIONS) {
+    state.derived.grids.VS3BET[heroPos] = {};
+    state.derived.freqs.VS3BET[heroPos] = {};
+    state.derived.border.VS3BET[heroPos] = {};
+    for (const villainPos of (VS3BET_VILLAIN_POSITIONS[heroPos] || [])) {
+      const { grid, freqByCell } = buildGridForVs3bet(heroPos, villainPos);
+      state.derived.grids.VS3BET[heroPos][villainPos] = grid;
+      state.derived.freqs.VS3BET[heroPos][villainPos] = freqByCell;
+      state.derived.border.VS3BET[heroPos][villainPos] = computeBorderSet(heroPos, grid);
+    }
+  }
+  // Matrix grids
+  for (const [matrix, cfg] of Object.entries(MATRIX_CONFIG)) {
+    state.derived.grids.MATRIX[matrix] = {};
+    state.derived.freqs.MATRIX[matrix] = {};
+    state.derived.border.MATRIX[matrix] = {};
+    for (const heroPos of cfg.heroPositions) {
+      state.derived.grids.MATRIX[matrix][heroPos] = {};
+      state.derived.freqs.MATRIX[matrix][heroPos] = {};
+      state.derived.border.MATRIX[matrix][heroPos] = {};
+      for (const villainPos of (cfg.villainPositions[heroPos] || [])) {
+        const { grid, freqByCell } = buildGridForMatrix(matrix, heroPos, villainPos);
+        state.derived.grids.MATRIX[matrix][heroPos][villainPos] = grid;
+        state.derived.freqs.MATRIX[matrix][heroPos][villainPos] = freqByCell;
+        state.derived.border.MATRIX[matrix][heroPos][villainPos] = computeBorderSet(heroPos, grid);
+      }
+    }
+  }
+}
+
+// Rebuild derived grids for a single matrix×hero×villain slot (after editor paints)
+function rebuildMatrixDerived(matrix, heroPos, villainPos) {
+  const { grid, freqByCell } = buildGridForMatrix(matrix, heroPos, villainPos);
+  state.derived.grids.MATRIX[matrix][heroPos][villainPos] = grid;
+  state.derived.freqs.MATRIX[matrix][heroPos][villainPos] = freqByCell;
+  state.derived.border.MATRIX[matrix][heroPos][villainPos] = computeBorderSet(heroPos, grid);
+}
+
+// Scenario-aware helpers
+function isMatrixScenario() { return MATRIX_KEYS.includes(state.scenario); }
+
+function getCurrentGrid() {
+  if (isMatrixScenario())
+    return state.derived.grids.MATRIX[state.scenario]?.[state.current?.pos]?.[state.current?.villainPos];
+  if (state.scenario === "VS3BET" && state.current?.villainPos)
+    return state.derived.grids.VS3BET[state.current.pos]?.[state.current.villainPos];
+  return state.derived.grids.RFI[state.current?.pos];
+}
+function getScenarioRanges(heroPos, villainPos) {
+  if (isMatrixScenario()) return THREBET_RANGES[state.scenario]?.[heroPos]?.[villainPos] || {};
+  if (state.scenario === "VS3BET") return VS3BET_RANGES[heroPos]?.[villainPos] || {};
+  return RANGES[heroPos];
+}
+function getScenarioActions() {
+  if (isMatrixScenario()) return MATRIX_CONFIG[state.scenario].actions;
+  return state.scenario === "VS3BET" ? VS3BET_ACTIONS : ACTIONS;
+}
+function getCurrentBorder() {
+  if (isMatrixScenario())
+    return state.derived.border.MATRIX[state.scenario]?.[state.current?.pos]?.[state.current?.villainPos];
+  if (state.scenario === "VS3BET" && state.current?.villainPos)
+    return state.derived.border.VS3BET[state.current.pos]?.[state.current.villainPos];
+  return state.derived.border.RFI[state.current?.pos];
 }
 
 // ============================================================
 // TRAINER LOGIC
 // ============================================================
 function choosePosition() {
+  if (isMatrixScenario()) {
+    const heroes = MATRIX_CONFIG[state.scenario].heroPositions;
+    if (state.settings.mode === "single" && heroes.includes(state.settings.position))
+      return state.settings.position;
+    return heroes[Math.floor(Math.random() * heroes.length)];
+  }
   if (state.settings.mode === "single") return state.settings.position;
   return POSITIONS[Math.floor(Math.random() * POSITIONS.length)];
 }
 
-function chooseHand(pos) {
+function chooseVillainPos(heroPos) {
+  if (isMatrixScenario()) {
+    const eligible = MATRIX_CONFIG[state.scenario].villainPositions[heroPos] || [];
+    return eligible[Math.floor(Math.random() * eligible.length)];
+  }
+  const eligible = VS3BET_VILLAIN_POSITIONS[heroPos] || [];
+  return eligible[Math.floor(Math.random() * eligible.length)];
+}
+
+function chooseHand(pos, villainPos) {
   const edgeP = state.settings.edgeWeight;
-  const allHands = Object.keys(RANGES[pos]);
+  const ranges = getScenarioRanges(pos, villainPos);
+  const allHands = Object.keys(ranges);
+  const border = getCurrentBorderFor(pos, villainPos);
   if (Math.random() < edgeP) {
-    const arr = Array.from(state.derived.border[pos]);
-    return arr[Math.floor(Math.random() * arr.length)];
+    const arr = border ? Array.from(border) : allHands;
+    if (arr.length > 0) return arr[Math.floor(Math.random() * arr.length)];
   }
   return allHands[Math.floor(Math.random() * allHands.length)];
+}
+
+// Border lookup without requiring state.current (used in chooseHand before state.current is set)
+function getCurrentBorderFor(pos, villainPos) {
+  if (isMatrixScenario())
+    return state.derived.border.MATRIX[state.scenario]?.[pos]?.[villainPos];
+  if (state.scenario === "VS3BET")
+    return state.derived.border.VS3BET[pos]?.[villainPos];
+  return state.derived.border.RFI[pos];
 }
 
 function setPhase(phase) { state.phase = phase; render(); }
 
 function newQuestion() {
   const pos = choosePosition();
-  const hand = chooseHand(pos);
-  const correct = dominantAction(RANGES[pos][hand]);
-  const isBorder = state.derived.border[pos].has(hand);
-  state.current = { pos, hand, correct, isBorder };
+  const needsVillain = state.scenario === "VS3BET" || isMatrixScenario();
+  const villainPos = needsVillain ? chooseVillainPos(pos) : null;
+  const acts = getScenarioActions();
+
+  let hand, cards;
+  if (state.settings.dealMode === "live") {
+    cards = dealTwo();
+    hand = deriveCategory(cards[0], cards[1]);
+    const ranges = getScenarioRanges(pos, villainPos);
+    if (!ranges[hand]) { cards = dealTwo(); hand = deriveCategory(cards[0], cards[1]); }
+  } else {
+    hand = chooseHand(pos, villainPos);
+    cards = assignSuits(hand);
+  }
+
+  const ranges = getScenarioRanges(pos, villainPos);
+  const freq = ranges[hand] || { FOLD: 1.0 };
+  const correct = dominantAction(freq, acts);
+  const border = isMatrixScenario()
+    ? state.derived.border.MATRIX[state.scenario]?.[pos]?.[villainPos]
+    : state.scenario === "VS3BET"
+    ? state.derived.border.VS3BET[pos]?.[villainPos]
+    : state.derived.border.RFI[pos];
+  const isBorder = border ? border.has(hand) : false;
+
+  state.current = { pos, villainPos, hand, cards, correct, isBorder };
   setPhase("ASKING");
 }
 
@@ -1228,9 +1660,11 @@ function recordResult(isCorrect) {
   const pos = state.current.pos;
   state.stats.hands += 1;
   state.stats.byPos[pos].hands += 1;
+  state.stats.byScenario[state.scenario].hands += 1;
   if (isCorrect) {
     state.stats.correct += 1;
     state.stats.byPos[pos].correct += 1;
+    state.stats.byScenario[state.scenario].correct += 1;
     state.stats.streak += 1;
     if (state.stats.streak > state.stats.best) state.stats.best = state.stats.streak;
     Audio.playCorrect();
@@ -1262,6 +1696,7 @@ function resetStats() {
   state.stats = {
     hands: 0, correct: 0, streak: 0, best: 0,
     byPos: Object.fromEntries(POSITIONS.map(p => [p, { hands: 0, correct: 0 }])),
+    byScenario: Object.fromEntries(ALL_SCENARIO_KEYS.map(k => [k, { hands: 0, correct: 0 }])),
     mistakes: new Map(),
   };
   render();
@@ -1271,8 +1706,17 @@ function resetStats() {
 // EDITOR LOGIC
 // ============================================================
 
-// Cycle: RAISE → FOLD → (CALL if SB) → RAISE
+// Cycle: RAISE → FOLD → (CALL if SB) → RAISE, or matrix action cycle
 function cycleAction(hand, pos) {
+  if (state.editor.matrix) {
+    const { matrix, heroPos, villainPos } = state.editor;
+    const ranges = THREBET_RANGES[matrix]?.[heroPos]?.[villainPos] || {};
+    const freq = ranges[hand] || {};
+    const acts = MATRIX_CONFIG[matrix].actions;
+    const dom = dominantAction(freq, acts);
+    const idx = acts.indexOf(dom);
+    return acts[(idx + 1) % acts.length];
+  }
   const freq = RANGES[pos][hand];
   const dom = dominantAction(freq);
   const actions = pos === "SB" ? ["RAISE", "FOLD", "CALL"] : ["RAISE", "FOLD"];
@@ -1284,10 +1728,31 @@ function paintCell(hand, pos, shiftKey) {
   const brush = state.editor.brush;
   const mf = state.editor.mixedFreq;
 
+  if (state.editor.matrix) {
+    const { matrix, heroPos, villainPos } = state.editor;
+    const ranges = THREBET_RANGES[matrix]?.[heroPos]?.[villainPos];
+    if (!ranges) return;
+    const acts = MATRIX_CONFIG[matrix].actions;
+    if (shiftKey) {
+      const currentFreq = ranges[hand] || {};
+      const current = dominantAction(currentFreq, acts);
+      const other = acts.find(a => a !== brush) || "FOLD";
+      const newFreq = Object.fromEntries(acts.map(a => [a, 0]));
+      newFreq[brush] = mf;
+      newFreq[current === brush ? other : current] = parseFloat((1 - mf).toFixed(4));
+      ranges[hand] = newFreq;
+    } else {
+      const newFreq = Object.fromEntries(acts.map(a => [a, 0]));
+      newFreq[brush] = 1.0;
+      ranges[hand] = newFreq;
+    }
+    return;
+  }
+
   if (shiftKey) {
     // Shift+paint: set a mixed frequency between brush action and the "other" dominant
     const current = dominantAction(RANGES[pos][hand]);
-    const other = current === brush ? (pos === "SB" ? "FOLD" : "FOLD") : current;
+    const other = current === brush ? "FOLD" : current;
     const newFreq = { RAISE: 0, CALL: 0, FOLD: 0 };
     newFreq[brush] = mf;
     newFreq[other === brush ? "FOLD" : other] = parseFloat((1 - mf).toFixed(4));
@@ -1299,27 +1764,52 @@ function paintCell(hand, pos, shiftKey) {
 }
 
 function applyEditorPaint(hand, shiftKey) {
+  if (state.editor.matrix) {
+    const { matrix, heroPos, villainPos } = state.editor;
+    paintCell(hand, null, shiftKey);
+    rebuildMatrixDerived(matrix, heroPos, villainPos);
+    setSaveStatus('saving');
+    saveThreebetRangesToStorage();
+    renderEditorGrid();
+    return;
+  }
   const pos = state.editor.pos;
   paintCell(hand, pos, shiftKey);
-  // Rebuild derived for this position
   const { grid, freqByCell } = buildGridForPosition(pos);
-  state.derived.grids[pos] = grid;
-  state.derived.freqs[pos] = freqByCell;
-  state.derived.border[pos] = computeBorderSet(pos, grid);
+  state.derived.grids.RFI[pos] = grid;
+  state.derived.freqs.RFI[pos] = freqByCell;
+  state.derived.border.RFI[pos] = computeBorderSet(pos, grid);
   setSaveStatus('saving');
   saveRangesToStorage();
   renderEditorGrid();
 }
 
 function fillPosition(action) {
+  if (state.editor.matrix) {
+    const { matrix, heroPos, villainPos } = state.editor;
+    const ranges = THREBET_RANGES[matrix]?.[heroPos]?.[villainPos];
+    if (!ranges) return;
+    const acts = MATRIX_CONFIG[matrix].actions;
+    // "RAISE" maps to the primary aggressive action for this matrix
+    const normalizedAction = (action === "RAISE" && !acts.includes("RAISE")) ? acts[0] : action;
+    for (const hand of Object.keys(ranges)) {
+      const newFreq = Object.fromEntries(acts.map(a => [a, 0]));
+      newFreq[normalizedAction] = 1.0;
+      ranges[hand] = newFreq;
+    }
+    rebuildMatrixDerived(matrix, heroPos, villainPos);
+    saveThreebetRangesToStorage();
+    renderEditorGrid();
+    return;
+  }
   const pos = state.editor.pos;
   for (const hand of Object.keys(RANGES[pos])) {
     RANGES[pos][hand] = { RAISE: 0, CALL: 0, FOLD: 0, [action]: 1.0 };
   }
   const { grid, freqByCell } = buildGridForPosition(pos);
-  state.derived.grids[pos] = grid;
-  state.derived.freqs[pos] = freqByCell;
-  state.derived.border[pos] = computeBorderSet(pos, grid);
+  state.derived.grids.RFI[pos] = grid;
+  state.derived.freqs.RFI[pos] = freqByCell;
+  state.derived.border.RFI[pos] = computeBorderSet(pos, grid);
   saveRangesToStorage();
   renderEditorGrid();
 }
@@ -1329,15 +1819,22 @@ function clearPosition() {
 }
 
 function exportRanges() {
-  const pos = state.editor.pos;
-  // Export only the currently selected position, named after it
-  const data = { [pos]: RANGES[pos] };
+  let data, filename;
+  if (state.editor.matrix) {
+    const { matrix, heroPos, villainPos } = state.editor;
+    data = { [matrix]: { [heroPos]: { [villainPos]: THREBET_RANGES[matrix][heroPos][villainPos] } } };
+    filename = `rfi_${matrix.toLowerCase()}_${heroPos.toLowerCase()}_vs_${villainPos.toLowerCase()}.json`;
+  } else {
+    const pos = state.editor.pos;
+    data = { [pos]: RANGES[pos] };
+    filename = `rfi_${pos.toLowerCase()}_range.json`;
+  }
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `rfi_${pos.toLowerCase()}_range.json`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1345,12 +1842,13 @@ function exportRanges() {
 }
 
 function exportAllRanges() {
-  const json = JSON.stringify(RANGES, null, 2);
+  const data = { RANGES, THREBET_RANGES };
+  const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "rfi_all_ranges.json";
+  a.download = "rfi_complete_ranges.json";
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1363,8 +1861,44 @@ function importRanges(file) {
     try {
       const parsed = JSON.parse(e.target.result);
       const positions = ["UTG", "HJ", "CO", "BTN", "SB"];
-      const ok = positions.every(p => parsed[p]);
-      if (!ok) { alert("Invalid ranges file — missing one or more positions."); return; }
+
+      // Case 1: Complete export (has both RANGES and THREBET_RANGES keys)
+      if (parsed.RANGES && parsed.THREBET_RANGES) {
+        if (!positions.every(p => parsed.RANGES[p])) { alert("Invalid file — missing RFI positions."); return; }
+        if (!MATRIX_KEYS.every(k => parsed.THREBET_RANGES[k])) { alert("Invalid file — missing matrix keys."); return; }
+        for (const pos of positions) RANGES[pos] = parsed.RANGES[pos];
+        THREBET_RANGES = parsed.THREBET_RANGES;
+        initDerived();
+        saveRangesToStorage();
+        saveThreebetRangesToStorage();
+        renderEditorGrid();
+        alert("Complete ranges imported successfully!");
+        return;
+      }
+
+      // Case 2: Matrix export (top-level key is a matrix key)
+      if (MATRIX_KEYS.some(k => parsed[k])) {
+        for (const [matrix, heroData] of Object.entries(parsed)) {
+          if (!MATRIX_KEYS.includes(matrix)) continue;
+          for (const [heroPos, villainData] of Object.entries(heroData)) {
+            for (const [villainPos, hands] of Object.entries(villainData)) {
+              if (THREBET_RANGES[matrix]?.[heroPos]?.[villainPos] !== undefined)
+                THREBET_RANGES[matrix][heroPos][villainPos] = hands;
+            }
+          }
+        }
+        for (const [matrix, cfg] of Object.entries(MATRIX_CONFIG))
+          for (const heroPos of cfg.heroPositions)
+            for (const villainPos of (cfg.villainPositions[heroPos] || []))
+              rebuildMatrixDerived(matrix, heroPos, villainPos);
+        saveThreebetRangesToStorage();
+        renderEditorGrid();
+        alert("Matrix ranges imported successfully!");
+        return;
+      }
+
+      // Case 3: RFI all-positions export
+      if (!positions.every(p => parsed[p])) { alert("Invalid ranges file — missing one or more positions."); return; }
       for (const pos of positions) RANGES[pos] = parsed[pos];
       initDerived();
       saveRangesToStorage();
@@ -1398,23 +1932,25 @@ function parseHandToCards(hand) {
 
 function seatHTML(pos, label, { active = false, dim = false, showCards = "back" } = {}) {
   let cards = "";
-  if (showCards === "hand") {
-    const { a, b, tag } = parseHandToCards(state.current.hand);
-    const suit1 = "♠";
-    const suit2 = tag === "o" ? "♥" : "♠";
-    const isRed2 = suit2 === "♥";
+  if (showCards === "hand" && state.current?.cards) {
+    const [c1, c2] = state.current.cards;
     cards = `<div class="cards">
-      <div class="card-mini black"><span class="rank">${a}</span><span class="suit">${suit1}</span></div>
-      <div class="card-mini ${isRed2 ? "red" : "black"}"><span class="rank">${b}</span><span class="suit">${suit2}</span></div>
+      <div class="card-mini ${SUIT_COLOR[c1.suit]}"><span class="rank">${c1.rank}</span><span class="suit">${c1.suit}</span></div>
+      <div class="card-mini ${SUIT_COLOR[c2.suit]}"><span class="rank">${c2.rank}</span><span class="suit">${c2.suit}</span></div>
     </div>`;
-  } else if (showCards === "back") {
+  } else if (showCards === "villain") {
+    cards = `<div class="cards"><div class="card-mini back villain-back"></div><div class="card-mini back villain-back"></div></div>`;
+  } else if (showCards === "aggressor") {
+    cards = `<div class="cards"><div class="card-mini back aggressor-back"></div><div class="card-mini back aggressor-back"></div></div>`;
+  } else {
     cards = `<div class="cards">
       <div class="card-mini back"></div>
       <div class="card-mini back"></div>
     </div>`;
   }
+  const extraClass = showCards === "villain" ? " villain" : showCards === "aggressor" ? " aggressor" : "";
   return `
-    <div class="seat ${pos.toLowerCase()} ${active ? "active" : ""} ${dim ? "dim" : ""}">
+    <div class="seat ${pos.toLowerCase()} ${active ? "active" : ""} ${dim ? "dim" : ""}${extraClass}">
       <div class="seat-chip">
         <div class="pos">${label}</div>
         <div class="stack">100</div>
@@ -1436,9 +1972,14 @@ const el = {
   sidebarEditor:     document.getElementById("sidebarEditor"),
 
   // Trainer controls
+  scenarioCategorySelect: document.getElementById("scenarioCategorySelect"),
+  scenarioMatrixSelect:   document.getElementById("scenarioMatrixSelect"),
+  scenarioMatrixField:    document.getElementById("scenarioMatrixField"),
+  dealModeSelect:    document.getElementById("dealModeSelect"),
   modeSelect:        document.getElementById("modeSelect"),
   positionField:     document.getElementById("positionField"),
   positionSelect:    document.getElementById("positionSelect"),
+  edgeWeightField:   document.getElementById("edgeWeightField"),
   edgeWeight:        document.getElementById("edgeWeight"),
   edgePctLabel:      document.getElementById("edgePctLabel"),
   showGridToggle:    document.getElementById("showGridToggle"),
@@ -1447,6 +1988,7 @@ const el = {
   resetBtn:          document.getElementById("resetBtn"),
 
   // Trainer display
+  pillSpot:          document.getElementById("pillSpot"),
   pillPos:           document.getElementById("pillPos"),
   pillSource:        document.getElementById("pillSource"),
   qTitle:            document.getElementById("qTitle"),
@@ -1474,8 +2016,13 @@ const el = {
   downloadCsvBtn:    document.getElementById("downloadCsvBtn"),
 
   // Editor controls
-  editorPosSelect:   document.getElementById("editorPosSelect"),
-  editorPosLabel:    document.getElementById("editorPosLabel"),
+  editorPosField:         document.getElementById("editorPosField"),
+  editorPosSelect:        document.getElementById("editorPosSelect"),
+  editorPosLabel:         document.getElementById("editorPosLabel"),
+  editorMatrixContext:    document.getElementById("editorMatrixContext"),
+  editorMatrixLabel:      document.getElementById("editorMatrixLabel"),
+  editorHeroPosSelect:    document.getElementById("editorHeroPosSelect"),
+  editorVillainPosSelect: document.getElementById("editorVillainPosSelect"),
   brushRaise:        document.getElementById("brushRaise"),
   brushCall:         document.getElementById("brushCall"),
   brushFold:         document.getElementById("brushFold"),
@@ -1505,6 +2052,25 @@ function switchView(view) {
   el.tabTrainer.classList.toggle("active", view === "trainer");
   el.tabEditor.classList.toggle("active", view === "editor");
   if (view === "editor") {
+    // Sync editor matrix context from current trainer scenario
+    if (isMatrixScenario()) {
+      const cfg = MATRIX_CONFIG[state.scenario];
+      state.editor.matrix = state.scenario;
+      if (!cfg.heroPositions.includes(state.editor.heroPos))
+        state.editor.heroPos = cfg.heroPositions[0];
+      const vills = cfg.villainPositions[state.editor.heroPos] || [];
+      if (!vills.includes(state.editor.villainPos))
+        state.editor.villainPos = vills[0];
+      if (el.editorMatrixContext) el.editorMatrixContext.hidden = false;
+      if (el.editorPosField) el.editorPosField.style.display = "none";
+      populateEditorHeroSelect();
+      populateEditorVillainSelect();
+    } else {
+      state.editor.matrix = null;
+      if (el.editorMatrixContext) el.editorMatrixContext.hidden = true;
+      if (el.editorPosField) el.editorPosField.style.display = "";
+    }
+    syncBrushButtonsForEditor();
     renderEditorGrid();
     setSaveStatus("saved");
   }
@@ -1515,26 +2081,50 @@ function switchView(view) {
 // ============================================================
 function renderTable() {
   const pos = state.current?.pos || "UTG";
+  const villainPos = state.current?.villainPos || null;
   const reveal = state.phase === "REVEAL";
+  const isMx = isMatrixScenario();
+  const mxCfg = isMx ? MATRIX_CONFIG[state.scenario] : null;
+  const isVs3bet = state.scenario === "VS3BET";
   const seats = [
-    { key: "UTG", cls: "utg", label: "UTG" },
-    { key: "HJ",  cls: "hj",  label: "HJ"  },
-    { key: "CO",  cls: "co",  label: "CO"  },
+    { key: "UTG", cls: "utg",      label: "UTG" },
+    { key: "HJ",  cls: "hj",       label: "HJ"  },
+    { key: "CO",  cls: "co",       label: "CO"  },
     { key: "BTN", cls: "seat-btn", label: "BTN" },
-    { key: "SB",  cls: "sb",  label: "SB"  },
-    { key: "BB",  cls: "bb",  label: "BB"  },
+    { key: "SB",  cls: "sb",       label: "SB"  },
+    { key: "BB",  cls: "bb",       label: "BB"  },
   ];
-  const seatBlocks = seats.map(s => seatHTML(s.cls, s.label, {
-    active: s.key === pos,
-    dim: s.key === "BB",
-    showCards: s.key === pos ? "hand" : "back",
-  })).join("");
+  const seatBlocks = seats.map(s => {
+    let showCards = "back";
+    if (s.key === pos) showCards = "hand";
+    else if (s.key === villainPos) showCards = isMx ? "aggressor" : "villain";
+    return seatHTML(s.cls, s.label, {
+      active: s.key === pos,
+      dim: s.key === "BB" && s.key !== villainPos,
+      showCards,
+    });
+  }).join("");
+
+  let potLabel, hintText;
+  if (isMx) {
+    potLabel = mxCfg.label;
+    if (reveal) hintText = "Reveal shown below";
+    else if (mxCfg.category === "offense") hintText = `${villainPos} opened → 3-bet?`;
+    else hintText = `${pos} raised → ${villainPos} 3-bets`;
+  } else if (isVs3bet) {
+    potLabel = "vs 3-Bet";
+    hintText = reveal ? "Reveal shown below" : `You raised → ${villainPos} 3-bets`;
+  } else {
+    potLabel = "RFI spot";
+    hintText = reveal ? "Reveal shown below" : "Choose Raise / Fold";
+  }
+
   el.tableStage.innerHTML = `
     <div class="poker-table">
       ${seatBlocks}
       <div class="table-center">
-        <div class="pot">RFI spot</div>
-        <div class="hint">${reveal ? "Reveal shown below" : "Choose Raise / Fold"}</div>
+        <div class="pot">${potLabel}</div>
+        <div class="hint">${hintText}</div>
       </div>
     </div>`;
   // Only pulse + deal on a fresh ASKING phase, not on reveal re-renders
@@ -1550,11 +2140,19 @@ function renderActionButtons() {
   const pos = state.current?.pos || "UTG";
   const acts = posActions(pos);
   el.actionButtons.innerHTML = "";
-  const mapKbd = a => a === "RAISE" ? "1" : a === "CALL" ? "2" : pos === "SB" ? "3" : "2";
+  const mapKbd = a => {
+    if (isMatrixScenario()) return String(acts.indexOf(a) + 1);
+    if (state.scenario === "VS3BET") {
+      if (a === "FOUR_BET") return "1";
+      if (a === "CALL") return "2";
+      return "3";
+    }
+    return a === "RAISE" ? "1" : a === "CALL" ? "2" : pos === "SB" ? "3" : "2";
+  };
   for (const a of acts) {
     const btn = document.createElement("button");
     btn.className = `action-btn ${actionToClass(a)}`;
-    btn.innerHTML = `<span>${a}</span><span class="kbd">${mapKbd(a)}</span>`;
+    btn.innerHTML = `<span>${actionDisplayName(a)}</span><span class="kbd">${mapKbd(a)}</span>`;
     btn.disabled = state.phase !== "ASKING";
     btn.addEventListener("click", () => answer(a));
     el.actionButtons.appendChild(btn);
@@ -1563,22 +2161,27 @@ function renderActionButtons() {
 
 function renderGrid() {
   const pos = state.current.pos;
-  const grid = state.derived.grids[pos];
+  const grid = getCurrentGrid();
+  const ranges = getScenarioRanges(pos, state.current.villainPos);
+  const acts = getScenarioActions();
   const [r, c] = cellFromHand(state.current.hand);
   el.gridWrap.innerHTML = "";
   for (let rr = 0; rr < 13; rr++)
     for (let cc = 0; cc < 13; cc++) {
       const hand = handLabelFromCell(rr, cc);
-      const freq = RANGES[pos][hand];
-      const dom = grid[rr][cc];
+      const defaultFreq = Object.fromEntries(acts.map(a => [a, a === "FOLD" ? 1.0 : 0]));
+      const freq = ranges[hand] || defaultFreq;
+      const dom = grid ? grid[rr][cc] : "FOLD";
       const cell = document.createElement("div");
       cell.className = `cell ${actionToClass(dom)}${rr === r && cc === c ? " active" : ""}`;
       cell.textContent = hand;
       const bar = document.createElement("div"); bar.className = "bar";
-      const segR = document.createElement("div"); segR.className = "seg raise"; segR.style.width = `${Math.round((freq.RAISE||0)*100)}%`;
-      const segC = document.createElement("div"); segC.className = "seg call";  segC.style.width = `${Math.round((freq.CALL ||0)*100)}%`;
-      const segF = document.createElement("div"); segF.className = "seg fold";  segF.style.width = `${Math.round((freq.FOLD ||0)*100)}%`;
-      bar.append(segR, segC, segF);
+      acts.forEach(a => {
+        const seg = document.createElement("div");
+        seg.className = `seg ${actionToClass(a)}`;
+        seg.style.width = `${Math.round((freq[a] || 0) * 100)}%`;
+        bar.appendChild(seg);
+      });
       cell.appendChild(bar);
       cell.addEventListener("mouseenter", () => {
         if (!state.settings.debug) return;
@@ -1589,18 +2192,17 @@ function renderGrid() {
 }
 
 function renderNeighbors() {
-  const pos = state.current.pos;
   const [r, c] = cellFromHand(state.current.hand);
-  const grid = state.derived.grids[pos];
+  const grid = getCurrentGrid();
   el.neighborsList.innerHTML = "";
   neighborsForCell(r, c).forEach(([rr, cc]) => {
     const hand = handLabelFromCell(rr, cc);
-    const dom = grid[rr][cc];
+    const dom = grid ? grid[rr][cc] : "FOLD";
     const row = document.createElement("div");
     row.className = "nei";
     row.innerHTML = `
       <div class="left"><span class="chip ${actionToClass(dom)}"></span><span class="hand">${hand}</span></div>
-      <div class="act">${dom}</div>`;
+      <div class="act">${actionDisplayName(dom)}</div>`;
     el.neighborsList.appendChild(row);
   });
 }
@@ -1623,37 +2225,75 @@ function renderStats() {
 }
 
 function render() {
+  const isLive = state.settings.dealMode === "live";
+  const isVs3bet = state.scenario === "VS3BET";
+  const isMx = isMatrixScenario();
+  const mxCfg = isMx ? MATRIX_CONFIG[state.scenario] : null;
+
   el.positionField.style.display = state.settings.mode === "single" ? "flex" : "none";
+  el.edgeWeightField.style.display = isLive ? "none" : "flex";
   el.edgePctLabel.textContent = `${Math.round(state.settings.edgeWeight * 100)}%`;
   el.edgeWeight.value = String(Math.round(state.settings.edgeWeight * 100));
   el.showGridToggle.checked = state.settings.showGrid;
   el.showNeighborsToggle.checked = state.settings.showNeighbors;
   el.debugToggle.checked = state.settings.debug;
+  el.dealModeSelect.value = state.settings.dealMode;
+
+  // Sync two-level scenario selector
+  const cat = isMx ? mxCfg.category : isVs3bet ? "defense" : "rfi";
+  if (el.scenarioCategorySelect) {
+    el.scenarioCategorySelect.value = cat;
+    populateScenarioMatrixSelect();
+    if (el.scenarioMatrixSelect) el.scenarioMatrixSelect.value = state.scenario;
+  }
+
   renderStats();
   if (!state.current) return;
-  el.pillPos.textContent = state.current.pos;
-  el.pillSource.textContent = `${Math.round(state.settings.edgeWeight * 100)}/${100 - Math.round(state.settings.edgeWeight * 100)} edge mix`;
-  el.qTitle.textContent = `RFI — ${state.current.pos}`;
-  el.qSub.textContent = state.current.isBorder ? "Border hand (adjacent to boundary)" : "Random hand";
-  el.handLabel.textContent = state.current.hand;
+
+  const { pos, villainPos, hand } = state.current;
+  el.pillPos.textContent = pos;
+  if (isMx) {
+    el.pillSpot.textContent = mxCfg.label;
+  } else {
+    el.pillSpot.textContent = isVs3bet ? "vs 3-Bet" : "RFI";
+  }
+  el.pillSource.textContent = isLive ? "Live simulation"
+    : `${Math.round(state.settings.edgeWeight * 100)}/${100 - Math.round(state.settings.edgeWeight * 100)} edge mix`;
+
+  if (isMx) {
+    el.qTitle.textContent = `${mxCfg.label} — ${mxCfg.nickname}`;
+    el.qSub.textContent = mxCfg.category === "offense"
+      ? `${villainPos} opened → you 3-bet?`
+      : `${pos} raised → ${villainPos} 3-bets back`;
+  } else if (isVs3bet) {
+    el.qTitle.textContent = `vs 3-Bet — ${pos}`;
+    el.qSub.textContent = `You raised → ${villainPos} 3-bets`;
+  } else {
+    el.qTitle.textContent = `RFI — ${pos}`;
+    el.qSub.textContent = isLive ? "Dealt from deck"
+      : state.current.isBorder ? "Border hand (adjacent to boundary)" : "Random hand";
+  }
+  el.handLabel.textContent = hand;
   renderTable();
   renderActionButtons();
+
   const reveal = state.phase === "REVEAL";
   el.revealCard.hidden = !reveal;
   el.nextBtnTop.disabled = !reveal;
   if (reveal) {
     el.revealTitle.textContent = state.current.isCorrect ? "Correct ✓" : "Incorrect ✕";
-    el.revealDetail.textContent = `Your answer: ${state.current.user} • Correct: ${state.current.correct}`;
+    el.revealDetail.textContent = `Your answer: ${actionDisplayName(state.current.user)} • Correct: ${actionDisplayName(state.current.correct)}`;
     el.gridPanel.style.display = state.settings.showGrid ? "block" : "none";
     el.neighborsPanel.style.display = state.settings.showNeighbors ? "block" : "none";
     if (state.settings.showGrid) renderGrid();
     if (state.settings.showNeighbors) renderNeighbors();
     el.debugArea.hidden = !state.settings.debug;
     if (state.settings.debug) {
-      const pos = state.current.pos;
       el.debugTotals.textContent = JSON.stringify({ pos, totals: weightedTotals(pos) }, null, 2);
-      const freq = RANGES[pos][state.current.hand];
-      el.debugCell.textContent = JSON.stringify({ pos, hand: state.current.hand, freq, dominant: dominantAction(freq) }, null, 2);
+      const ranges = getScenarioRanges(pos, villainPos);
+      const freq = ranges[hand];
+      const acts = getScenarioActions();
+      el.debugCell.textContent = JSON.stringify({ pos, hand, freq, dominant: dominantAction(freq, acts) }, null, 2);
     }
   }
 }
@@ -1662,16 +2302,33 @@ function render() {
 // RENDER — EDITOR GRID
 // ============================================================
 function renderEditorGrid() {
-  const pos = state.editor.pos;
+  const isMatrix = !!state.editor.matrix;
+  let pos, ranges, acts;
+
+  if (isMatrix) {
+    const { matrix, heroPos, villainPos } = state.editor;
+    pos = heroPos;
+    ranges = THREBET_RANGES[matrix]?.[heroPos]?.[villainPos] || {};
+    acts = MATRIX_CONFIG[matrix].actions;
+    el.editorPosLabel.textContent = `${heroPos} vs ${villainPos}`;
+    if (el.editorMatrixLabel) el.editorMatrixLabel.textContent = `${MATRIX_CONFIG[matrix].label} — ${heroPos}`;
+  } else {
+    pos = state.editor.pos;
+    ranges = RANGES[pos];
+    acts = ACTIONS;
+    el.editorPosLabel.textContent = pos;
+  }
+
   el.editorGridWrap.innerHTML = "";
-  el.editorPosLabel.textContent = pos;
 
   for (let rr = 0; rr < 13; rr++)
     for (let cc = 0; cc < 13; cc++) {
       const hand = handLabelFromCell(rr, cc);
-      const freq = RANGES[pos][hand];
-      const dom = dominantAction(freq);
-      const mixed = isMixed(freq);
+      const defaultFreq = Object.fromEntries(acts.map(a => [a, a === "FOLD" ? 1.0 : 0]));
+      const freq = ranges[hand] || defaultFreq;
+      const dom = dominantAction(freq, acts);
+      const vals = acts.map(a => freq[a] ?? 0).filter(v => v > 0);
+      const mixed = vals.length > 1;
 
       const cell = document.createElement("div");
       cell.className = `cell editor-cell ${mixed ? "mixed" : actionToClass(dom)}`;
@@ -1680,21 +2337,19 @@ function renderEditorGrid() {
 
       // Frequency bar at bottom
       const bar = document.createElement("div"); bar.className = "bar";
-      const segR = document.createElement("div"); segR.className = "seg raise"; segR.style.width = `${Math.round((freq.RAISE||0)*100)}%`;
-      const segC = document.createElement("div"); segC.className = "seg call";  segC.style.width = `${Math.round((freq.CALL ||0)*100)}%`;
-      const segF = document.createElement("div"); segF.className = "seg fold";  segF.style.width = `${Math.round((freq.FOLD ||0)*100)}%`;
-      bar.append(segR, segC, segF);
+      acts.forEach(a => {
+        const seg = document.createElement("div");
+        seg.className = `seg ${actionToClass(a)}`;
+        seg.style.width = `${Math.round((freq[a] || 0) * 100)}%`;
+        bar.appendChild(seg);
+      });
       cell.appendChild(bar);
 
       // Hover info
       cell.addEventListener("mouseenter", () => {
-        const pct = v => Math.round((v||0)*100);
-        const parts = [];
-        if (freq.RAISE > 0) parts.push(`R:${pct(freq.RAISE)}%`);
-        if (freq.CALL  > 0) parts.push(`C:${pct(freq.CALL)}%`);
-        if (freq.FOLD  > 0) parts.push(`F:${pct(freq.FOLD)}%`);
+        const pct = v => Math.round((v || 0) * 100);
+        const parts = acts.filter(a => (freq[a] || 0) > 0).map(a => `${actionDisplayName(a)[0]}:${pct(freq[a])}%`);
         el.editorHandInfo.textContent = `${hand} — ${parts.join(" / ")}`;
-        // Paint if dragging
         if (state.editor.isPainting) applyEditorPaint(hand, state.editor.paintShift);
       });
 
@@ -1702,7 +2357,6 @@ function renderEditorGrid() {
       cell.addEventListener("mousedown", (e) => {
         e.preventDefault();
         if (e.button === 2) {
-          // Right-click: cycle action
           const next = cycleAction(hand, pos);
           state.editor.brush = next;
           updateBrushUI(next);
@@ -1715,7 +2369,6 @@ function renderEditorGrid() {
       });
 
       cell.addEventListener("contextmenu", e => e.preventDefault());
-
       el.editorGridWrap.appendChild(cell);
     }
 }
@@ -1727,6 +2380,84 @@ function updateBrushUI(action) {
   });
 }
 
+// Sync brush button labels/visibility to current editor mode
+function syncBrushButtonsForEditor() {
+  const isMatrix = !!state.editor.matrix;
+  if (isMatrix) {
+    const acts = MATRIX_CONFIG[state.editor.matrix].actions;
+    // Primary aggressive action replaces Raise button
+    el.brushRaise.dataset.action = acts[0];
+    el.brushRaise.textContent = actionDisplayName(acts[0]);
+    el.brushRaise.className = `brush-btn raise`;
+    // Call button only if matrix has CALL
+    const hasCall = acts.includes("CALL");
+    el.brushCall.style.display = hasCall ? "" : "none";
+    el.brushCall.dataset.action = "CALL";
+    el.brushCall.textContent = "Call";
+    el.brushFold.dataset.action = "FOLD";
+    el.brushFold.textContent = "Fold";
+    // Ensure brush is valid
+    if (!acts.includes(state.editor.brush)) state.editor.brush = acts[0];
+  } else {
+    el.brushRaise.dataset.action = "RAISE";
+    el.brushRaise.textContent = "Raise";
+    el.brushRaise.className = `brush-btn raise`;
+    el.brushCall.style.display = state.editor.pos === "SB" ? "" : "none";
+    el.brushCall.dataset.action = "CALL";
+    el.brushCall.textContent = "Call";
+    el.brushFold.dataset.action = "FOLD";
+    el.brushFold.textContent = "Fold";
+  }
+  updateBrushUI(state.editor.brush);
+}
+
+// Populate hero position select for current matrix editor
+function populateEditorHeroSelect() {
+  if (!state.editor.matrix || !el.editorHeroPosSelect) return;
+  const cfg = MATRIX_CONFIG[state.editor.matrix];
+  el.editorHeroPosSelect.innerHTML = cfg.heroPositions
+    .map(p => `<option value="${p}"${p === state.editor.heroPos ? " selected" : ""}>${p}</option>`)
+    .join("");
+}
+
+// Populate villain position select based on current hero
+function populateEditorVillainSelect() {
+  if (!state.editor.matrix || !el.editorVillainPosSelect) return;
+  const cfg = MATRIX_CONFIG[state.editor.matrix];
+  const vills = cfg.villainPositions[state.editor.heroPos] || [];
+  el.editorVillainPosSelect.innerHTML = vills
+    .map(p => `<option value="${p}"${p === state.editor.villainPos ? " selected" : ""}>${p}</option>`)
+    .join("");
+}
+
+// Populate the scenario matrix select based on category
+function populateScenarioMatrixSelect() {
+  if (!el.scenarioCategorySelect || !el.scenarioMatrixSelect) return;
+  const cat = el.scenarioCategorySelect.value;
+  let options;
+  if (cat === "rfi") {
+    options = [{ value: "RFI", label: "RFI — Raise First In" }];
+  } else if (cat === "offense") {
+    options = MATRIX_KEYS.filter(k => MATRIX_CONFIG[k].category === "offense")
+      .map(k => ({ value: k, label: `${MATRIX_CONFIG[k].label} — ${MATRIX_CONFIG[k].nickname}` }));
+  } else {
+    options = [
+      { value: "VS3BET", label: "vs 3-Bet (Quick)" },
+      ...MATRIX_KEYS.filter(k => MATRIX_CONFIG[k].category === "defense")
+        .map(k => ({ value: k, label: `${MATRIX_CONFIG[k].label} — ${MATRIX_CONFIG[k].nickname}` })),
+    ];
+  }
+  el.scenarioMatrixSelect.innerHTML = options
+    .map(o => `<option value="${o.value}">${o.label}</option>`)
+    .join("");
+}
+
+function setScenarioFromSelectors() {
+  if (!el.scenarioMatrixSelect) return;
+  const val = el.scenarioMatrixSelect.value;
+  if (val) { state.scenario = val; newQuestion(); }
+}
+
 // ============================================================
 // BIND — ALL EVENT LISTENERS
 // ============================================================
@@ -1735,7 +2466,16 @@ function bind() {
   el.tabTrainer.addEventListener("click", () => switchView("trainer"));
   el.tabEditor.addEventListener("click",  () => switchView("editor"));
 
-  // Trainer controls
+  // Trainer controls — two-level scenario selector
+  el.scenarioCategorySelect.addEventListener("change", () => {
+    populateScenarioMatrixSelect();
+    setScenarioFromSelectors();
+  });
+  el.scenarioMatrixSelect.addEventListener("change", setScenarioFromSelectors);
+  el.dealModeSelect.addEventListener("change", () => {
+    state.settings.dealMode = el.dealModeSelect.value;
+    newQuestion();
+  });
   el.modeSelect.addEventListener("change", () => { state.settings.mode = el.modeSelect.value; render(); });
   el.positionSelect.addEventListener("change", () => { state.settings.position = el.positionSelect.value; render(); });
   el.edgeWeight.addEventListener("input", () => { state.settings.edgeWeight = parseInt(el.edgeWeight.value, 10) / 100; render(); });
@@ -1753,9 +2493,19 @@ function bind() {
     if (state.phase !== "ASKING") return;
     const pos = state.current?.pos;
     if (!pos) return;
-    if (e.key === "1") return answer("RAISE");
-    if (e.key === "2" && pos === "SB") return answer("CALL");
-    if (e.key === "3" || e.key === "2") return answer("FOLD");
+    if (isMatrixScenario()) {
+      const acts = MATRIX_CONFIG[state.scenario].actions;
+      const idx = parseInt(e.key) - 1;
+      if (idx >= 0 && idx < acts.length) return answer(acts[idx]);
+      return;
+    }
+    if (e.key === "1") return answer(state.scenario === "VS3BET" ? "FOUR_BET" : "RAISE");
+    if (e.key === "2") {
+      if (state.scenario === "VS3BET") return answer("CALL");
+      if (pos === "SB") return answer("CALL");
+      return answer("FOLD");
+    }
+    if (e.key === "3") return answer("FOLD");
   });
 
   // CSV download
@@ -1775,8 +2525,22 @@ function bind() {
   // Editor controls
   el.editorPosSelect.addEventListener("change", () => {
     state.editor.pos = el.editorPosSelect.value;
-    // Show/hide call brush — only available for SB
-    el.brushCall.style.display = state.editor.pos === "SB" ? "" : "none";
+    syncBrushButtonsForEditor();
+    renderEditorGrid();
+  });
+
+  el.editorHeroPosSelect.addEventListener("change", () => {
+    state.editor.heroPos = el.editorHeroPosSelect.value;
+    // Re-validate villain pos for new hero
+    const cfg = MATRIX_CONFIG[state.editor.matrix];
+    const vills = cfg.villainPositions[state.editor.heroPos] || [];
+    if (!vills.includes(state.editor.villainPos)) state.editor.villainPos = vills[0];
+    populateEditorVillainSelect();
+    renderEditorGrid();
+  });
+
+  el.editorVillainPosSelect.addEventListener("change", () => {
+    state.editor.villainPos = el.editorVillainPosSelect.value;
     renderEditorGrid();
   });
 
@@ -1804,8 +2568,8 @@ function bind() {
   // Stop painting on mouseup anywhere
   window.addEventListener("mouseup", () => { state.editor.isPainting = false; });
 
-  // Hide Call brush for non-SB positions initially
-  el.brushCall.style.display = "none";
+  // Initialize brush buttons for the default (RFI UTG) state
+  syncBrushButtonsForEditor();
 }
 
 // ============================================================
@@ -1813,6 +2577,7 @@ function bind() {
 // ============================================================
 initDerived();
 bind();
+populateScenarioMatrixSelect();
 setSaveStatus("saved");
 // Resume AudioContext on first interaction (browser autoplay policy)
 document.addEventListener("click", () => {
